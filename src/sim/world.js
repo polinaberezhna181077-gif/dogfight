@@ -2,10 +2,11 @@ import { Ship } from './ship.js';
 import { Bullet, Asteroid, Pickup, Explosion, HomingBehavior } from './entities.js';
 import { detectCollisions } from './collision.js';
 
-export class World {
+export class World extends EventTarget {
   #entities = new Map();
 
   constructor(width, height) {
+    super();
     this.width = width;
     this.height = height;
     this.score = 0;
@@ -40,17 +41,16 @@ export class World {
   spawnBullet(pos, vel, angle, ownerId, isHoming = false) {
     const bullet = new Bullet(pos, vel, angle, ownerId);
     if (isHoming) {
-      // Композиція: прикріплюємо самонаведення на найближчий астероїд
       bullet.homing = new HomingBehavior('asteroid', 5, 450);
     }
     this.spawn(bullet);
+    this.dispatchEvent(new CustomEvent('fired', { detail: { bullet } }));
   }
 
   spawnPlayer() {
     let x = this.width / 2;
     let y = this.height / 2;
 
-    // Шукаємо безпечну точку подалі від астероїдів
     for (let attempt = 0; attempt < 15; attempt++) {
       const rx = 80 + Math.random() * (this.width - 160);
       const ry = 80 + Math.random() * (this.height - 160);
@@ -74,7 +74,6 @@ export class World {
   }
 
   step(dt, input) {
-    // 1. Респаун корабля через 2 секунди після знищення
     if (this.playerShip && !this.playerShip.alive) {
       this.respawnTimer += dt;
       if (this.respawnTimer >= 2.0) {
@@ -83,19 +82,16 @@ export class World {
       }
     }
 
-    // 2. Оновлення всіх живих сутностей
     for (const e of this) {
       if (e.alive) {
         e.update(dt, this, e === this.playerShip ? input : null);
       }
     }
 
-    // 3. Обробка колізій
     for (const [a, b] of detectCollisions(this)) {
       this.resolveCollision(a, b);
     }
 
-    // 4. Sweep: безпечне видалення мертвих сутностей наприкінці кроку
     for (const [id, e] of this.#entities) {
       if (!e.alive) {
         this.#entities.delete(id);
@@ -104,7 +100,6 @@ export class World {
   }
 
   resolveCollision(a, b) {
-    // Куля влучила в астероїд
     if ((a.kind === 'bullet' && b.kind === 'asteroid') || (b.kind === 'bullet' && a.kind === 'asteroid')) {
       const bullet = a.kind === 'bullet' ? a : b;
       const asteroid = a.kind === 'asteroid' ? a : b;
@@ -114,14 +109,15 @@ export class World {
       this.score += 100;
       this.spawn(new Explosion(asteroid.pos.x, asteroid.pos.y));
 
-      // 35% шанс випадання бонусу (pickup)
+      this.dispatchEvent(new CustomEvent('exploded', { detail: { pos: asteroid.pos } }));
+      this.dispatchEvent(new CustomEvent('scoreChanged', { detail: { score: this.score } }));
+
       if (Math.random() < 0.35) {
         const bonus = Math.random() < 0.5 ? 'shield' : 'rapid';
         this.spawn(new Pickup(asteroid.pos.x, asteroid.pos.y, bonus));
       }
     }
 
-    // Корабель зіткнувся з астероїдом
     if ((a.kind === 'ship' && b.kind === 'asteroid') || (b.kind === 'ship' && a.kind === 'asteroid')) {
       const ship = a.kind === 'ship' ? a : b;
       const asteroid = a.kind === 'asteroid' ? a : b;
@@ -130,12 +126,14 @@ export class World {
       ship.takeDamage(50);
       this.spawn(new Explosion(asteroid.pos.x, asteroid.pos.y));
 
+      this.dispatchEvent(new CustomEvent('hit', { detail: { hp: ship.hp } }));
+
       if (!ship.alive) {
         this.spawn(new Explosion(ship.pos.x, ship.pos.y));
+        this.dispatchEvent(new CustomEvent('exploded', { detail: { pos: ship.pos } }));
       }
     }
 
-    // Корабель підібрав пикап
     if ((a.kind === 'ship' && b.kind === 'pickup') || (b.kind === 'ship' && a.kind === 'pickup')) {
       const ship = a.kind === 'ship' ? a : b;
       const pickup = a.kind === 'pickup' ? a : b;

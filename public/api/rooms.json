@@ -1,0 +1,35 @@
+[
+  {
+    "id": "room-alpha",
+    "name": "Alpha Sector (Standard)",
+    "players": 1,
+    "maxPlayers": 4,
+    "arena": {
+      "asteroidCount": 4,
+      "bgColor": "#11151c",
+      "gridColor": "#222b38"
+    }
+  },
+  {
+    "id": "room-meteor",
+    "name": "Meteor Storm (Hardcore)",
+    "players": 2,
+    "maxPlayers": 4,
+    "arena": {
+      "asteroidCount": 9,
+      "bgColor": "#1c1115",
+      "gridColor": "#382229"
+    }
+  },
+  {
+    "id": "room-nebula",
+    "name": "Deep Nebula (Chill)",
+    "players": 0,
+    "maxPlayers": 6,
+    "arena": {
+      "asteroidCount": 2,
+      "bgColor": "#0f1916",
+      "gridColor": "#1d332d"
+    }
+  }
+]

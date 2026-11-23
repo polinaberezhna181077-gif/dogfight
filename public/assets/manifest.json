@@ -1,0 +1,17 @@
+{
+  "sprites": {
+    "sheet": "/assets/sprites.png"
+  },
+  "frames": {
+    "ship": { "x": 0, "y": 0, "w": 64, "h": 64 },
+    "bullet": { "x": 64, "y": 0, "w": 64, "h": 64 },
+    "asteroid": { "x": 128, "y": 0, "w": 64, "h": 64 },
+    "pickup": { "x": 192, "y": 0, "w": 64, "h": 64 }
+  },
+  "sounds": {
+    "shoot": "/assets/shoot.wav",
+    "hit": "/assets/hit.wav",
+    "explosion": "/assets/explosion.wav"
+  },
+  "arena": "/assets/arena.json"
+}
