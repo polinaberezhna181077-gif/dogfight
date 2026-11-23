@@ -4,7 +4,6 @@ export class SoundSystem {
     this.buffers = {};
   }
 
-  // Розблоковуємо AudioContext після жесту гравця
   async unlock() {
     if (this.ctx.state === 'suspended') {
       await this.ctx.resume();
@@ -25,7 +24,6 @@ export class SoundSystem {
     source.start(0);
   }
 
-  // Підписка на шину подій світу без імпорту audio у симуляцію
   attachToWorld(world) {
     world.addEventListener('fired', () => this.play('shoot'));
     world.addEventListener('hit', () => this.play('hit'));

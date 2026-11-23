@@ -1,31 +1,21 @@
-# Dogfight — Лабораторні роботи №2–3
+# Dogfight — Лабораторна робота №4 (Node.js: EventEmitter, Streams, WebSocket-сервер)
 
-Аркадна космічна гра на JavaScript: об'єктна модель сутностей, менеджер світу на базі `Map`, асинхронний пайплайн завантаження ассетів, лобі перед грою та звук через Web Audio API.
-
----
-
-## Лабораторна робота №3: Асинхронний JavaScript, Loading Screen, Lobby та Web Audio
-
-### 1. Порівняння завантаження ассетів: Sequential `await` vs Concurrent `Promise.all`
-
-Завантаження 5 файлів із `manifest.json` (`sprites.png`, `shoot.wav`, `hit.wav`, `explosion.wav`, `arena.json`) при штучній затримці мережі (~150 мс на кожен запит):
-
-| Режим завантаження | Реалізація | Загальний час | Поведінка прогрес-бару |
-| :--- | :--- | :---: | :--- |
-| **Sequential (`for..of` + `await`)** | Кожен файл чекає завершення попереднього (`await loadImg(); await loadAudio()...`) | **~785 мс** | Крок за кроком: 20% → 40% → 60% → 80% → 100% |
-| **Concurrent (`Promise.all`)** | Усі 5 запитів стартують одночасно, загальний час = найдовший запит | **~172 мс** | Оновлюється по мірі завершення кожного промісу (у 4.5 раза швидше) |
+Мультиплеєрний сервер і клієнт у форматі `npm workspaces` (`client/` + `server/`): HTTP-сервер на `node:http`, WebSocket-сервер на `ws` із валідацією протоколу та heartbeat, кімнати на базі `EventEmitter` та потокове логування матчів у форматі NDJSON через `Transform` + `pipeline`.
 
 ---
 
-### 2. П'ять головоломок порядку виконання (Microtasks vs Tasks vs rAF)
+## 1. Доказ Backpressure: графік пам'яті (`rss`) при завантаженні 200 МБ реплею
 
-#### Головоломка 1: Базовий `async/await` та синхронний код
-```js
-async function load() {
-  console.log('A');
-  await Promise.resolve();
-  console.log('B');
-}
-console.log('C');
-load();
-console.log('D');
+При завантаженні синтетичного логу матчу обсягом **200 МБ** (`GET /api/replays/benchmark-200mb.ndjson`) через повільний канал (**Slow 3G / 1 Mbps throttling** у DevTools) сервер використовує потокову передачу `pipeline(createReadStream(file), res)` замість буферизації файлу в оперативну пам'ять (`readFile`).
+
+### Динаміка `process.memoryUsage().rss` під час стрімінгу 200 МБ:
+
+```text
+RSS (MB)
+250 |                                              [Без backpressure: OOM / ріст буфера]
+200 |                                          . '
+150 |                                      . '
+100 |                                  . '
+ 50 |  *-------*-------*-------*-------*-------*   [З pipeline + backpressure: ~39–42 MB]
+  0 +--------------------------------------------> Час завантаження (с)
+       0s      15s     30s     45s     60s     75s

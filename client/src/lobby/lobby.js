@@ -1,7 +1,7 @@
 import { fetchJson } from '../assets/loader.js';
 
 export class Lobby extends EventTarget {
-  constructor(endpoint = '/api/rooms.json') {
+  constructor(endpoint = '/api/rooms') {
     super();
     this.endpoint = endpoint;
     this.rooms = [];
@@ -11,12 +11,10 @@ export class Lobby extends EventTarget {
   }
 
   async refresh() {
-    // Скасовуємо попередній незавершений запит, якщо він ще триває
     this.inFlightController?.abort();
     const manualController = new AbortController();
     this.inFlightController = manualController;
 
-    // Об'єднуємо ручне скасування при виході з лобі та таймаут 3000 мс
     const signal = AbortSignal.any([
       manualController.signal,
       AbortSignal.timeout(3000)
@@ -29,7 +27,7 @@ export class Lobby extends EventTarget {
       this.dispatchEvent(new CustomEvent('roomsChanged', { detail: this.rooms }));
     } catch (err) {
       if (err.name === 'AbortError' || err.name === 'TimeoutError') {
-        return; // Штатне скасування при виході або таймаут
+        return;
       }
       this.dispatchEvent(new CustomEvent('error', { detail: err.message }));
     } finally {
@@ -39,7 +37,22 @@ export class Lobby extends EventTarget {
     }
   }
 
-  startPolling(intervalMs = 4000) {
+  async createRoom(name) {
+    const res = await fetch(this.endpoint, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name, maxPlayers: 6 })
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error || `HTTP ${res.status}`);
+    }
+    const created = await res.json();
+    await this.refresh();
+    return created;
+  }
+
+  startPolling(intervalMs = 3000) {
     this.active = true;
     this.refresh();
     this.pollTimer = setInterval(() => {
@@ -47,7 +60,6 @@ export class Lobby extends EventTarget {
     }, intervalMs);
   }
 
-  // Скасовуємо опитування та поточний fetch, щойно гравець пішов із лобі
   leave() {
     this.active = false;
     if (this.pollTimer) {
@@ -70,4 +82,4 @@ export class Lobby extends EventTarget {
       })
     );
   }
-}
+} 

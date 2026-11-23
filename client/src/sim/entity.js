@@ -14,7 +14,6 @@ export class Entity {
     this.kind = kind;
     this.alive = true;
 
-    // Поле для композиції (поведінка самонаведення)
     this.homing = null;
   }
 
@@ -30,7 +29,6 @@ export class Entity {
   update(dt, world) {
     this.savePrevState();
 
-    // Якщо до сутності прикріплений компонент самонаведення (Композиція!)
     if (this.homing) {
       this.homing.update(this, dt, world);
     }

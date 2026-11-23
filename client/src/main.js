@@ -8,14 +8,14 @@ import { Asteroid, Pickup, HomingBehavior } from './sim/entities.js';
 import { loadJson, loadAll } from './assets/loader.js';
 import { SoundSystem } from './audio.js';
 import { Lobby } from './lobby/lobby.js';
-import { mountLobbyView } from './lobby/lobbyView.js';
+import { mountLobbyView, mountRoomChatOverlay } from './lobby/lobbyView.js';
+import { GameConnection } from './net/connection.js';
 
 const canvas = document.getElementById('game');
 const { ctx, width, height } = setupCanvas(canvas);
 
 const sound = new SoundSystem();
 
-// Розблоковуємо Web Audio при першому жесті користувача
 const unlockAudio = () => sound.unlock();
 window.addEventListener('pointerdown', unlockAudio, { once: true });
 window.addEventListener('keydown', unlockAudio, { once: true });
@@ -36,13 +36,11 @@ async function boot() {
       }
     });
 
-    console.log(`Assets loaded concurrently in ${assets.loadTimeMs}ms`);
     sound.setBuffers(assets.sounds);
 
-    // Показуємо лобі після завершення завантаження ассетів
-    const lobby = new Lobby('/api/rooms.json');
+    const lobby = new Lobby('/api/rooms');
     mountLobbyView(lobby);
-    lobby.startPolling(4000);
+    lobby.startPolling(3000);
 
     lobby.addEventListener('joined', (e) => {
       sound.unlock();
@@ -56,11 +54,20 @@ async function boot() {
 }
 
 function startGame(assets, session) {
+  const wsProto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+  const connection = new GameConnection(`${wsProto}//${window.location.host}/ws`);
+  mountRoomChatOverlay(connection, session.room.name);
+  connection.connect();
+  connection.send({
+    type: 'join',
+    room: session.room.id,
+    name: session.playerName
+  });
+
   const input = createInput(window);
   const world = new World(width, height);
   const hud = new Hud();
 
-  // Підписуємо звук і HUD на події світу (симуляція нічого про них не знає)
   sound.attachToWorld(world);
   hud.attachToWorld(world);
 
@@ -126,4 +133,4 @@ function startGame(assets, session) {
   loop.start();
 }
 
-boot();
+boot(); 

@@ -1,13 +1,12 @@
 import { Entity } from './entity.js';
 import { Vector2 } from './vector.js';
 
-// === КОМПОЗИЦІЯ: поведінка самонаведення ===
 export class HomingBehavior {
   constructor(targetKind, turnRate = 4, speed = 350) {
     this.targetKind = targetKind;
     this.turnRate = turnRate;
     this.speed = speed;
-  }
+  } 
 
   update(entity, dt, world) {
     let closest = null;
@@ -31,7 +30,6 @@ export class HomingBehavior {
   }
 }
 
-// === КУЛЯ (з TTL) ===
 export class Bullet extends Entity {
   constructor(pos, vel, angle, ownerId) {
     super({ x: pos.x, y: pos.y, vx: vel.x, vy: vel.y, angle, radius: 3, kind: 'bullet' });
@@ -49,7 +47,6 @@ export class Bullet extends Entity {
   }
 }
 
-// === АСТЕРОЇД ===
 export class Asteroid extends Entity {
   constructor(x, y, radius = 24) {
     const angle = Math.random() * Math.PI * 2;
@@ -81,15 +78,13 @@ export class Asteroid extends Entity {
   }
 }
 
-// === ПИКАП (Бонус: стоїть на місці, колізиться, не корабель) ===
 export class Pickup extends Entity {
   constructor(x, y, bonusType = 'shield') {
     super({ x, y, vx: 0, vy: 0, radius: 13, kind: 'pickup' });
-    this.bonusType = bonusType; // 'shield' або 'rapid'
+    this.bonusType = bonusType; 
   }
 }
 
-// === ВИБУХ (Частинки) ===
 export class Explosion extends Entity {
   constructor(x, y) {
     super({ x, y, radius: 1, kind: 'explosion' });
