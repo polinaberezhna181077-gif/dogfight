@@ -3,11 +3,16 @@
   "version": "1.0.0",
   "type": "module",
   "scripts": {
-    "dev": "node --env-file=../.env --watch src/index.js",
-    "start": "node --env-file=../.env src/index.js"
+    "build": "tsc -p tsconfig.json",
+    "dev": "npm run build && node --env-file=../.env --watch dist/index.js",
+    "start": "npm run build && node --env-file=../.env dist/index.js"
   },
   "dependencies": {
     "@dogfight/shared": "*",
-    "ws": "^8.18.0"
+    "ws": "^8.18.0",
+    "zod": "^3.24.0"
+  },
+  "devDependencies": {
+    "@types/ws": "^8.5.14"
   }
 }

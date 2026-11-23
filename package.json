@@ -7,10 +7,16 @@
     "server"
   ],
   "scripts": {
+    "build:shared": "tsc -b shared",
     "dev:server": "npm --workspace=server run dev",
     "dev:client": "npm --workspace=client run dev",
-    "build": "npm --workspace=client run build",
+    "build": "npm run build:shared && npm --workspace=client run build",
     "start": "npm --workspace=server run start",
-    "test:shared": "node --test shared/test/determinism.test.js"
+    "typecheck": "npm run build:shared && tsc --noEmit -p server/tsconfig.json && tsc --noEmit -p client/tsconfig.json",
+    "test:shared": "node --test shared/test/determinism.test.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.7.0"
   }
 }
