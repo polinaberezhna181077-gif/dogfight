@@ -86,6 +86,14 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  if (req.method === 'GET' && pathname === '/api/stats') {
+    sendJson(res, 200, {
+      uptimeSec: Math.round(process.uptime()),
+      rssMb: Math.round((process.memoryUsage().rss / 1024 / 1024) * 10) / 10,
+      matches: roomManager.getAllStats()
+    });
+    return;
+  }
   if (req.method === 'GET' && (pathname === '/api/rooms' || pathname === '/api/rooms.json')) {
     sendJson(res, 200, roomManager.list());
     return;

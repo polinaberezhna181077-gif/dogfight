@@ -8,43 +8,46 @@ export function validateClientMessage(raw) {
     return { ok: false, code: 1007, reason: 'Invalid JSON' };
   }
 
-  if (!msg || typeof msg !== 'object') {
-    return { ok: false, code: 1003, reason: 'Message must be an object' };
+  if (typeof msg !== 'object' || msg === null) {
+    return { ok: false, code: 1003, reason: 'Message must be a JSON object' };
   }
 
-  if (msg.v !== undefined && msg.v !== PROTOCOL_VERSION) {
-    return { ok: false, code: 1002, reason: `Unsupported protocol version: ${msg.v}` };
+  if (msg.v !== PROTOCOL_VERSION) {
+    return { ok: false, code: 1003, reason: `Unsupported protocol version: ${msg.v}` };
   }
 
   if (msg.type === 'join') {
-    if (typeof msg.room !== 'string' || !msg.room.trim() || msg.room.length > 32) {
+    if (typeof msg.room !== 'string' || !msg.room.trim()) {
       return { ok: false, code: 1003, reason: 'Invalid room id' };
     }
-    if (typeof msg.name !== 'string' || !msg.name.trim() || msg.name.length > 20) {
+    if (typeof msg.name !== 'string') {
       return { ok: false, code: 1003, reason: 'Invalid player name' };
     }
-    return {
-      ok: true,
-      msg: {
-        type: 'join',
-        room: msg.room.trim(),
-        name: msg.name.trim()
-      }
-    };
+    const cleanName = msg.name.trim().slice(0, 16);
+    if (!cleanName) {
+      return { ok: false, code: 1003, reason: 'Player name cannot be empty' };
+    }
+    return { ok: true, msg: { type: 'join', room: msg.room.trim(), name: cleanName } };
   }
 
   if (msg.type === 'chat') {
-    if (typeof msg.text !== 'string' || !msg.text.trim() || msg.text.length > 200) {
-      return { ok: false, code: 1003, reason: 'Invalid chat text' };
+    if (typeof msg.text !== 'string') {
+      return { ok: false, code: 1003, reason: 'Chat text must be a string' };
     }
-    return {
-      ok: true,
-      msg: {
-        type: 'chat',
-        text: msg.text.trim()
-      }
-    };
+    const cleanText = msg.text.trim().slice(0, 200);
+    if (!cleanText) {
+      return { ok: false, code: 1003, reason: 'Chat message cannot be empty' };
+    }
+    return { ok: true, msg: { type: 'chat', text: cleanText } };
   }
 
-  return { ok: false, code: 1003, reason: `Unknown message type: ${String(msg.type)}` };
-}
+  if (msg.type === 'input') {
+    return { ok: true, msg };
+  }
+
+  if (msg.type === 'ping' || msg.type === 'netcfg') {
+    return { ok: true, msg };
+  }
+
+  return { ok: false, code: 1003, reason: `Unknown message type: ${msg.type}` };
+} 

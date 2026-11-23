@@ -1,21 +1,46 @@
 import { WebSocketServer, WebSocket } from 'ws';
 import { randomUUID } from 'node:crypto';
+import { decodeInputBinary } from '@dogfight/shared';
 import { validateClientMessage, PROTOCOL_VERSION } from './protocol.js';
 
 const MAX_BUFFERED_BYTES = 64 * 1024;
-const RATE_LIMIT_MAX = 15; 
+const RATE_LIMIT_MAX = 60;
 
-function safeSend(socket, payloadObj, { critical = false } = {}) {
-  if (socket.readyState !== WebSocket.OPEN) return;
-  if (!critical && socket.bufferedAmount > MAX_BUFFERED_BYTES) {
+export const netSim = {
+  delayMs: 0,
+  jitterMs: 0,
+  dropRate: 0,
+  protocol: 'binary'
+};
+
+function withNetSim(fn) {
+  if (netSim.dropRate > 0 && Math.random() < netSim.dropRate) {
     return;
   }
+  const jitter = netSim.jitterMs > 0 ? (Math.random() * 2 - 1) * netSim.jitterMs : 0;
+  const totalDelay = Math.max(0, netSim.delayMs + jitter);
+  if (totalDelay <= 0) {
+    fn();
+  } else {
+    setTimeout(fn, totalDelay);
+  }
+}
+
+function safeSendJson(socket, payloadObj, { critical = false } = {}) {
+  if (socket.readyState !== WebSocket.OPEN) return;
+  if (!critical && socket.bufferedAmount > MAX_BUFFERED_BYTES) return;
   socket.send(JSON.stringify({ v: PROTOCOL_VERSION, ...payloadObj }));
+}
+
+function safeSendBinary(socket, arrayBuffer) {
+  if (socket.readyState !== WebSocket.OPEN) return;
+  if (socket.bufferedAmount > MAX_BUFFERED_BYTES) return;
+  socket.send(Buffer.from(arrayBuffer), { binary: true });
 }
 
 function broadcastRoom(room, payloadObj, options = {}) {
   for (const player of room.players.values()) {
-    safeSend(player.socket, payloadObj, options);
+    safeSendJson(player.socket, payloadObj, options);
   }
 }
 
@@ -25,6 +50,30 @@ export function setupWebSocketServer(httpServer, roomManager, config) {
     path: '/ws',
     maxPayload: config.maxPayloadBytes
   });
+
+  for (const room of roomManager.rooms.values()) {
+    attachRoomSnapshotForwarder(room);
+  }
+  const origCreate = roomManager.createRoom.bind(roomManager);
+  roomManager.createRoom = (opts) => {
+    const room = origCreate(opts);
+    attachRoomSnapshotForwarder(room);
+    return room;
+  };
+
+  function attachRoomSnapshotForwarder(room) {
+    room.on('snapshot', ({ playerId, snapObj, toBinary }) => {
+      const player = room.players.get(playerId);
+      if (!player) return;
+      const mode = player.protocol || netSim.protocol;
+      if (mode === 'json') {
+        withNetSim(() => safeSendJson(player.socket, snapObj));
+      } else {
+        const bin = toBinary();
+        withNetSim(() => safeSendBinary(player.socket, bin));
+      }
+    });
+  }
 
   const heartbeatInterval = setInterval(() => {
     for (const socket of wss.clients) {
@@ -39,11 +88,14 @@ export function setupWebSocketServer(httpServer, roomManager, config) {
 
   wss.on('close', () => clearInterval(heartbeatInterval));
 
-  wss.on('connection', (socket) => {
+  wss.on('connection', (socket, req) => {
+    const url = new URL(req.url, 'http://localhost');
+    const clientProto = url.searchParams.get('proto') === 'json' ? 'json' : 'binary';
+
     socket.missedPongs = 0;
     socket.msgCount = 0;
     socket.rateWindowStart = Date.now();
-    socket.session = null; 
+    socket.session = null;
 
     socket.on('error', (err) => {
       console.error('WebSocket client error:', err.message);
@@ -59,7 +111,7 @@ export function setupWebSocketServer(httpServer, roomManager, config) {
       }
     }, 5000);
 
-    socket.on('message', (rawData) => {
+    socket.on('message', (rawData, isBinary) => {
       const now = Date.now();
       if (now - socket.rateWindowStart >= 1000) {
         socket.rateWindowStart = now;
@@ -71,6 +123,18 @@ export function setupWebSocketServer(httpServer, roomManager, config) {
         return;
       }
 
+      if (isBinary) {
+        if (!socket.session) return;
+        try {
+          const inp = decodeInputBinary(rawData);
+          const { player, room } = socket.session;
+          withNetSim(() => room.match.enqueueInput(player.id, inp));
+        } catch (err) {
+          socket.close(1007, err.message);
+        }
+        return;
+      }
+
       const parsed = validateClientMessage(rawData.toString('utf8'));
       if (!parsed.ok) {
         socket.close(parsed.code, parsed.reason);
@@ -78,6 +142,30 @@ export function setupWebSocketServer(httpServer, roomManager, config) {
       }
 
       const msg = parsed.msg;
+
+      if (msg.type === 'ping') {
+        withNetSim(() => safeSendJson(socket, { type: 'pong', t: msg.t }, { critical: true }));
+        return;
+      }
+
+      if (msg.type === 'input') {
+        if (!socket.session) return;
+        const { player, room } = socket.session;
+        withNetSim(() => room.match.enqueueInput(player.id, msg));
+        return;
+      }
+
+      if (msg.type === 'netcfg') {
+        if (typeof msg.delayMs === 'number') netSim.delayMs = Math.max(0, Math.min(2000, msg.delayMs));
+        if (typeof msg.jitterMs === 'number') netSim.jitterMs = Math.max(0, Math.min(1000, msg.jitterMs));
+        if (typeof msg.dropRate === 'number') netSim.dropRate = Math.max(0, Math.min(0.9, msg.dropRate));
+        if (msg.protocol === 'json' || msg.protocol === 'binary') {
+          netSim.protocol = msg.protocol;
+          if (socket.session) socket.session.player.protocol = msg.protocol;
+        }
+        safeSendJson(socket, { type: 'netcfg', ...netSim }, { critical: true });
+        return;
+      }
 
       if (msg.type === 'join') {
         if (socket.session) {
@@ -93,6 +181,7 @@ export function setupWebSocketServer(httpServer, roomManager, config) {
         const player = {
           id: randomUUID().slice(0, 8),
           name: msg.name,
+          protocol: clientProto,
           socket
         };
 
@@ -104,13 +193,16 @@ export function setupWebSocketServer(httpServer, roomManager, config) {
         clearTimeout(joinTimer);
         socket.session = { player, room };
 
-        safeSend(
+        safeSendJson(
           socket,
           {
             type: 'welcome',
             playerId: player.id,
+            ownerId: player.ownerId,
+            seed: room.match.seed,
             room: room.toSummary(),
-            players: room.getRoster()
+            players: room.getRoster(),
+            netSim
           },
           { critical: true }
         );

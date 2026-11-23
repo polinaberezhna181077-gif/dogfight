@@ -1,3 +1,8 @@
+import {
+  encodeInputBinary,
+  decodeSnapshotBinary
+} from '@dogfight/shared';
+
 export class GameConnection extends EventTarget {
   constructor(url) {
     super();
@@ -8,32 +13,69 @@ export class GameConnection extends EventTarget {
     this.attempt = 0;
     this.reconnectTimer = null;
     this.lastJoinPayload = null;
+    this.protocolMode = 'binary';
+
+    this.bytesInWindow = 0;
+    this.bytesOutWindow = 0;
+    this.bytesInPerSec = 0;
+    this.bytesOutPerSec = 0;
+    this.rttMs = 0;
+
+    setInterval(() => {
+      this.bytesInPerSec = this.bytesInWindow;
+      this.bytesOutPerSec = this.bytesOutWindow;
+      this.bytesInWindow = 0;
+      this.bytesOutWindow = 0;
+    }, 1000);
+
+    setInterval(() => {
+      if (this.socket && this.socket.readyState === WebSocket.OPEN) {
+        this.send({ type: 'ping', t: performance.now() });
+      }
+    }, 1000);
   }
 
   connect() {
     this.shouldReconnect = true;
     const ws = new WebSocket(this.url);
+    ws.binaryType = 'arraybuffer';
     this.socket = ws;
 
     ws.onopen = () => {
       this.attempt = 0;
       this.dispatchEvent(new Event('open'));
 
-      // Якщо це реконект після розриву — повторно заходимо в ту саму кімнату
       if (this.lastJoinPayload) {
-        ws.send(JSON.stringify({ v: 1, ...this.lastJoinPayload }));
+        this.sendRawJson({ v: 1, ...this.lastJoinPayload });
       }
 
-      // Відправляємо накопичену чергу повідомлень
       while (this.sendQueue.length > 0 && ws.readyState === WebSocket.OPEN) {
-        ws.send(this.sendQueue.shift());
+        const item = this.sendQueue.shift();
+        this.bytesOutWindow += item.byteLength || item.length;
+        ws.send(item);
       }
     };
 
     ws.onmessage = (event) => {
+      if (event.data instanceof ArrayBuffer) {
+        this.bytesInWindow += event.data.byteLength;
+        try {
+          const snap = decodeSnapshotBinary(event.data);
+          this.dispatchEvent(new CustomEvent('snapshot', { detail: snap }));
+        } catch (err) {
+          console.error('Bad binary snapshot:', err);
+        }
+        return;
+      }
+
+      this.bytesInWindow += event.data.length;
       try {
         const msg = JSON.parse(event.data);
-        if (msg && msg.type) {
+        if (msg?.type === 'pong') {
+          this.rttMs = Math.max(0, Math.round(performance.now() - msg.t));
+          return;
+        }
+        if (msg?.type) {
           this.dispatchEvent(new CustomEvent(msg.type, { detail: msg }));
         }
       } catch (err) {
@@ -43,7 +85,6 @@ export class GameConnection extends EventTarget {
 
     ws.onclose = (event) => {
       this.dispatchEvent(new CustomEvent('close', { detail: event }));
-      // Не перепідключаємося при навмисному виході або помилці протоколу (4000-4099)
       if (!this.shouldReconnect || (event.code >= 4000 && event.code < 4100)) {
         return;
       }
@@ -51,22 +92,38 @@ export class GameConnection extends EventTarget {
       this.attempt++;
       this.reconnectTimer = setTimeout(() => this.connect(), delay);
     };
+  }
 
-    ws.onerror = () => {
-      // Подія close спрацює автоматично слідом
-    };
+  sendRawJson(obj) {
+    const raw = JSON.stringify(obj);
+    if (this.socket && this.socket.readyState === WebSocket.OPEN) {
+      this.bytesOutWindow += raw.length;
+      this.socket.send(raw);
+    } else {
+      this.sendQueue.push(raw);
+    }
+  }
+
+  sendInput(input) {
+    if (this.protocolMode === 'binary') {
+      const buf = encodeInputBinary(input);
+      if (this.socket && this.socket.readyState === WebSocket.OPEN) {
+        this.bytesOutWindow += buf.byteLength;
+        this.socket.send(buf);
+      }
+    } else {
+      this.sendRawJson({ v: 1, type: 'input', ...input });
+    }
   }
 
   send(payload) {
     if (payload.type === 'join') {
       this.lastJoinPayload = payload;
     }
-    const raw = JSON.stringify({ v: 1, ...payload });
-    if (this.socket && this.socket.readyState === WebSocket.OPEN) {
-      this.socket.send(raw);
-    } else {
-      this.sendQueue.push(raw);
+    if (payload.type === 'netcfg' && payload.protocol) {
+      this.protocolMode = payload.protocol;
     }
+    this.sendRawJson({ v: 1, ...payload });
   }
 
   close() {

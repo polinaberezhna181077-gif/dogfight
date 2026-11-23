@@ -1,19 +1,26 @@
-import { createLoop } from './loop.js';
+import {
+  KIND_SHIP,
+  KIND_ASTEROID,
+  KIND_BULLET,
+  Ship,
+  Bullet,
+  integrateShip,
+  BULLET_SPEED,
+  FIRE_COOLDOWN,
+  Vector2
+} from '@dogfight/shared';
 import { createInput } from './input.js';
 import { setupCanvas } from './render/canvas.js';
-import { drawLoadingScreen, drawWorld } from './render/draw.js';
-import { Hud } from './render/hud.js';
-import { World } from './sim/world.js';
-import { Asteroid, Pickup, HomingBehavior } from './sim/entities.js';
+import { drawLoadingScreen } from './render/draw.js';
 import { loadJson, loadAll } from './assets/loader.js';
 import { SoundSystem } from './audio.js';
 import { Lobby } from './lobby/lobby.js';
 import { mountLobbyView, mountRoomChatOverlay } from './lobby/lobbyView.js';
 import { GameConnection } from './net/connection.js';
+import { Netgraph, mountNetControls } from './render/netgraph.js';
 
 const canvas = document.getElementById('game');
 const { ctx, width, height } = setupCanvas(canvas);
-
 const sound = new SoundSystem();
 
 const unlockAudio = () => sound.unlock();
@@ -44,19 +51,100 @@ async function boot() {
 
     lobby.addEventListener('joined', (e) => {
       sound.unlock();
-      startGame(assets, e.detail);
+      startMultiplayerGame(assets, e.detail);
     });
   } catch (err) {
     console.error('Boot failed:', err);
     drawLoadingScreen(ctx, width, height, progress, statusLabel, err.message);
-    canvas.addEventListener('click', () => boot(), { once: true });
   }
 }
 
-function startGame(assets, session) {
+function lerpAngle(a, b, t) {
+  let diff = ((b - a + Math.PI) % (Math.PI * 2)) - Math.PI;
+  if (diff < -Math.PI) diff += Math.PI * 2;
+  return a + diff * t;
+}
+
+function startMultiplayerGame(assets, session) {
+  const netState = {
+    protocol: 'binary',
+    predictionEnabled: true,
+    interpDelayMs: 70
+  };
+
   const wsProto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-  const connection = new GameConnection(`${wsProto}//${window.location.host}/ws`);
+  const connection = new GameConnection(`${wsProto}//${window.location.host}/ws?proto=binary`);
   mountRoomChatOverlay(connection, session.room.name);
+  mountNetControls(connection, netState);
+
+  const netgraph = new Netgraph();
+  const input = createInput(window);
+  const bounds = { width: 960, height: 640 };
+
+  let myOwnerId = null;
+  let localShip = new Ship({ id: 0, ownerId: 0, x: width / 2, y: height / 2 });
+  let smoothOffsetX = 0;
+  let smoothOffsetY = 0;
+  let lastCorrectionPx = 0;
+
+  let inputSeq = 0;
+  const pendingInputs = [];
+  const localBullets = [];
+  const snapshotBuffer = [];
+  let latestTick = 0;
+  let lastSnapshotTime = performance.now();
+
+  connection.addEventListener('welcome', (e) => {
+    myOwnerId = e.detail.ownerId;
+    localShip.ownerId = myOwnerId;
+  });
+
+  connection.addEventListener('snapshot', (e) => {
+    const snap = e.detail;
+    latestTick = snap.tick;
+    lastSnapshotTime = performance.now();
+
+    snapshotBuffer.push({ recvTime: lastSnapshotTime, snap });
+    if (snapshotBuffer.length > 30) snapshotBuffer.shift();
+
+    const authMe = snap.entities.find((ent) => ent.kind === KIND_SHIP && ent.ownerId === myOwnerId);
+    if (!authMe) return;
+
+    while (pendingInputs.length > 0 && pendingInputs[0].seq <= snap.lastProcessedSeq) {
+      pendingInputs.shift();
+    }
+
+    if (!netState.predictionEnabled) {
+      lastCorrectionPx = Math.hypot(authMe.x - localShip.x, authMe.y - localShip.y);
+      localShip = Ship.fromSnapshot(authMe);
+      smoothOffsetX = 0;
+      smoothOffsetY = 0;
+      return;
+    }
+
+    const prevX = localShip.x;
+    const prevY = localShip.y;
+
+    const reconciled = Ship.fromSnapshot(authMe);
+    for (const inp of pendingInputs) {
+      integrateShip(reconciled, inp, 1 / 30, bounds);
+    }
+
+    const errX = prevX - reconciled.x;
+    const errY = prevY - reconciled.y;
+    lastCorrectionPx = Math.hypot(errX, errY);
+
+    if (lastCorrectionPx < 120) {
+      smoothOffsetX += errX;
+      smoothOffsetY += errY;
+    } else {
+      smoothOffsetX = 0;
+      smoothOffsetY = 0;
+    }
+
+    localShip = reconciled;
+  });
+
   connection.connect();
   connection.send({
     type: 'join',
@@ -64,73 +152,186 @@ function startGame(assets, session) {
     name: session.playerName
   });
 
-  const input = createInput(window);
-  const world = new World(width, height);
-  const hud = new Hud();
+  const SIM_DT = 1 / 30;
+  let accumulator = 0;
+  let lastFrame = performance.now();
 
-  sound.attachToWorld(world);
-  hud.attachToWorld(world);
-
-  const arenaCfg = session.room?.arena || assets.arena || {};
-  const minAsteroids = arenaCfg.asteroidCount || 4;
-  const bgColor = arenaCfg.bgColor || '#11151c';
-  const gridColor = arenaCfg.gridColor || '#222b38';
-
-  world.spawnPlayer();
-
-  for (let i = 0; i < minAsteroids; i++) {
-    world.spawn(new Asteroid(Math.random() * width, Math.random() * height));
+  function sampleInput() {
+    const turn = (input.isDown('ArrowRight') || input.isDown('KeyD') ? 1 : 0)
+      - (input.isDown('ArrowLeft') || input.isDown('KeyA') ? 1 : 0);
+    const thrust = (input.isDown('ArrowUp') || input.isDown('KeyW')) ? 1 : 0;
+    const fire = input.isDown('Space') ? 1 : 0;
+    return { turn, thrust, fire };
   }
 
-  const homingAst = new Asteroid(60, 60, 20);
-  homingAst.homing = new HomingBehavior('ship', 1.8, 95);
-  world.spawn(homingAst);
+  function stepClientSim(dt) {
+    const raw = sampleInput();
+    inputSeq++;
+    const cmd = { seq: inputSeq, ...raw };
+    connection.sendInput(cmd);
 
-  world.spawn(new Pickup(width * 0.25, height * 0.3, 'rapid'));
+    if (netState.predictionEnabled && myOwnerId !== null) {
+      pendingInputs.push(cmd);
+      integrateShip(localShip, cmd, dt, bounds);
 
-  window.addEventListener('keydown', (e) => {
-    if (e.code === 'Space') {
-      world.playerShip?.fire(world, false);
+      if (cmd.fire && localShip.cooldown <= 0) {
+        localShip.cooldown = FIRE_COOLDOWN;
+        const dir = Vector2.fromAngle(localShip.angle);
+        localBullets.push(new Bullet({
+          id: -inputSeq,
+          ownerId: myOwnerId,
+          x: localShip.x + dir.x * (localShip.radius + 6),
+          y: localShip.y + dir.y * (localShip.radius + 6),
+          vx: localShip.vx + dir.x * BULLET_SPEED,
+          vy: localShip.vy + dir.y * BULLET_SPEED,
+          angle: localShip.angle,
+          ttl: 0.35
+        }));
+      }
     }
-    if (e.code === 'KeyH') {
-      world.playerShip?.fire(world, true);
-    }
-  });
 
-  function drawBackground() {
-    ctx.fillStyle = bgColor;
+    for (let i = localBullets.length - 1; i >= 0; i--) {
+      localBullets[i].step(dt, bounds);
+      if (localBullets[i].hp <= 0) localBullets.splice(i, 1);
+    }
+
+    const decay = Math.exp(-dt / 0.1);
+    smoothOffsetX *= decay;
+    smoothOffsetY *= decay;
+  }
+
+  function getInterpolatedEntities() {
+    if (snapshotBuffer.length === 0) return [];
+    const renderTime = performance.now() - netState.interpDelayMs;
+
+    let older = snapshotBuffer[0];
+    let newer = snapshotBuffer[snapshotBuffer.length - 1];
+
+    for (let i = 0; i < snapshotBuffer.length - 1; i++) {
+      if (snapshotBuffer[i].recvTime <= renderTime && snapshotBuffer[i + 1].recvTime >= renderTime) {
+        older = snapshotBuffer[i];
+        newer = snapshotBuffer[i + 1];
+        break;
+      }
+    }
+
+    const span = Math.max(1, newer.recvTime - older.recvTime);
+    const alpha = Math.max(0, Math.min(1, (renderTime - older.recvTime) / span));
+
+    const olderMap = new Map(older.snap.entities.map((e) => [e.id, e]));
+    const result = [];
+
+    for (const curr of newer.snap.entities) {
+      if (curr.kind === KIND_SHIP && curr.ownerId === myOwnerId) continue;
+      const prev = olderMap.get(curr.id);
+      if (!prev || Math.hypot(curr.x - prev.x, curr.y - prev.y) > 200) {
+        result.push(curr);
+      } else {
+        result.push({
+          ...curr,
+          x: prev.x + (curr.x - prev.x) * alpha,
+          y: prev.y + (curr.y - prev.y) * alpha,
+          angle: lerpAngle(prev.angle, curr.angle, alpha)
+        });
+      }
+    }
+    return result;
+  }
+
+  function drawShip(ship, color) {
+    ctx.save();
+    ctx.translate(ship.x, ship.y);
+    ctx.rotate(ship.angle);
+    ctx.strokeStyle = color;
+    ctx.fillStyle = '#0f172a';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(16, 0);
+    ctx.lineTo(-12, -10);
+    ctx.lineTo(-7, 0);
+    ctx.lineTo(-12, 10);
+    ctx.closePath();
+    ctx.fill();
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  function frame(now) {
+    const dt = Math.min(0.1, (now - lastFrame) / 1000);
+    lastFrame = now;
+    accumulator += dt;
+
+    while (accumulator >= SIM_DT) {
+      stepClientSim(SIM_DT);
+      accumulator -= SIM_DT;
+    }
+
+    const arenaCfg = session.room?.arena || {};
+    ctx.fillStyle = arenaCfg.bgColor || '#11151c';
     ctx.fillRect(0, 0, width, height);
-    ctx.strokeStyle = gridColor;
+
+    ctx.strokeStyle = arenaCfg.gridColor || '#222b38';
     ctx.lineWidth = 1;
     ctx.beginPath();
-    for (let i = 0; i < width; i += 50) { ctx.moveTo(i, 0); ctx.lineTo(i, height); }
-    for (let i = 0; i < height; i += 50) { ctx.moveTo(0, i); ctx.lineTo(width, i); }
+    for (let x = 0; x < width; x += 50) { ctx.moveTo(x, 0); ctx.lineTo(x, height); }
+    for (let y = 0; y < height; y += 50) { ctx.moveTo(0, y); ctx.lineTo(width, y); }
     ctx.stroke();
+
+    const remoteEntities = getInterpolatedEntities();
+    for (const ent of remoteEntities) {
+      if (ent.kind === KIND_ASTEROID) {
+        ctx.save();
+        ctx.translate(ent.x, ent.y);
+        ctx.rotate(ent.angle);
+        ctx.strokeStyle = '#94a3b8';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.arc(0, 0, 22, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.restore();
+      } else if (ent.kind === KIND_SHIP) {
+        drawShip(ent, '#f43f5e');
+      } else if (ent.kind === KIND_BULLET) {
+        ctx.fillStyle = '#fb7185';
+        ctx.beginPath();
+        ctx.arc(ent.x, ent.y, 3.5, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+
+    for (const b of localBullets) {
+      ctx.fillStyle = '#38bdf8';
+      ctx.beginPath();
+      ctx.arc(b.x, b.y, 3.5, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    if (myOwnerId !== null) {
+      drawShip({
+        x: localShip.x + smoothOffsetX,
+        y: localShip.y + smoothOffsetY,
+        angle: localShip.angle
+      }, '#38bdf8');
+    }
+
+    netgraph.pushSample(connection.rttMs, lastCorrectionPx);
+    netgraph.draw(ctx, {
+      protocol: netState.protocol,
+      tick: latestTick,
+      rttMs: connection.rttMs,
+      snapshotAgeMs: Math.round(now - lastSnapshotTime),
+      bytesIn: connection.bytesInPerSec,
+      bytesOut: connection.bytesOutPerSec,
+      pendingInputs: pendingInputs.length,
+      interpDelayMs: netState.interpDelayMs,
+      correctionPx: lastCorrectionPx,
+      predictionEnabled: netState.predictionEnabled
+    });
+
+    requestAnimationFrame(frame);
   }
 
-  const sessionInfo = {
-    playerName: session.playerName,
-    roomName: session.room.name
-  };
-
-  const loop = createLoop({
-    step: 1 / 60,
-    simulate: (dt) => {
-      if (Array.from(world.ofKind('asteroid')).length < minAsteroids) {
-        world.spawn(new Asteroid(Math.random() * width, 0));
-      }
-      world.step(dt, input);
-      hud.update(dt);
-    },
-    render: (alpha) => {
-      ctx.clearRect(0, 0, width, height);
-      drawBackground();
-      drawWorld(ctx, world, alpha, assets);
-      hud.draw(ctx, loop.getStats(), world, sessionInfo);
-    }
-  });
-
-  loop.start();
+  requestAnimationFrame(frame);
 }
 
 boot(); 
